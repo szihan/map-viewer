@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>海洋数据地图展示</title>
+  <!-- 引入 Leaflet 样式 -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html,
+    body,
+    #map {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      width: 100%;
+    }
+
+    #map {
+      height: 100vh;
+    }
+
+    /* 右侧图层按钮面板样式 */
+    /* 按钮容器 */
+    #btnContainer {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      transform: none;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      z-index: 1000;
+    }
+
+    /* 单个按钮样式 */
+    #btnContainer button {
+      padding: 5px 8px;
+      font-size: 12px;
+      cursor: pointer;
+      border: none;
+      border-radius: 4px;
+      background-color: rgba(255, 255, 255, 0.9);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+      transition: background-color 0.3s;
+    }
+
+
+    #btnContainer button:hover,
+    #btnContainer button.active {
+      background-color: #4a90e2;
+      color: white;
+      font-weight: bold;
+      box-shadow: 0 0 8px #4a90e2;
+    }
+  </style>
+</head>
+
+<body>
+  <!-- 地图容器 -->
+  <div id="map"></div>
+
+  <!-- 右侧图层按钮 -->
+  <div id="btnContainer">
+    <button data-file="大亚湾自然保护区.json">大亚湾自然保护区</button>
+    <button data-file="海岸线3.json">海岸线3</button>
+    <button data-file="海岸线7.json">海岸线7</button>
+    <button data-file="海岛.json">海岛</button>
+    <button data-file="海洋生态保护区.json">海洋生态保护区</button>
+    <button data-file="沙滩.json">沙滩</button>
+    <button data-file="现状锚地用海.json">现状锚地用海</button>
+  </div>
+
+  <!-- 引入 Leaflet 与 Turf.js -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+
+  <script>
+    // 初始化地图（中心设为深圳）
+    const map = L.map('map', {
+      center: [22.543096, 114.057865],
+      zoom: 10,
+      minZoom: 5,
+      maxZoom: 18
+    });
+
+    // 创建两个窗格：imagePane 用于底图图层（可加滤镜）
+    map.createPane('imagePane');
+    map.createPane('overlayPane');
+    map.getPane('imagePane').style.filter = 'brightness(1.5) contrast(0.6) saturate(0.5)';
+
+    // 加载天地图影像图层，应用到 imagePane 上
+    const tiandituKey = 'c04403802c1a3daccf98e9fb94e4bd23';
+    const imgUrlTemplate = `https://t{s}.tianditu.gov.cn/img_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=img&STYLE=default&TILEMATRIXSET=w&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=tiles&tk=${tiandituKey}`;
+    const tianLayer = L.tileLayer(imgUrlTemplate, {
+      subdomains: ['0', '1', '2', '3', '4', '5', '6', '7'],
+      tileSize: 256,
+      maxZoom: 18,
+      attribution: '&copy; 天地图',
+      pane: 'imagePane'
+    }).addTo(map);
+
+    // 状态变量
+    let currentGeoJsonLayer = null; // 当前显示的 GeoJSON 图层
+    let highlightedLayer = null;     // 当前高亮的要素
+
+    // 返回结果
+    let currentFeatureProps = null;  // 当前选中要素的属性
+    let currentLocation = null;  // 当前点击位置的经纬度
+
+    // 各图层对应的样式
+    const layerStyles = {
+      '大亚湾自然保护区.json': { weight: 0, fillColor: 'red', fillOpacity: 0.6 },
+      '海岛.json': { weight: 0, fillColor: 'red', fillOpacity: 0.6 },
+      '海洋生态保护区.json': { weight: 0, fillColor: 'red', fillOpacity: 0.6 },
+      '沙滩.json': { weight: 0, fillColor: 'red', fillOpacity: 0.6 },
+      '现状锚地用海.json': { weight: 0, fillColor: 'red', fillOpacity: 0.6 },
+      '海岸线3.json': { color: 'red', weight: 4 },
+      '海岸线7.json': { color: 'red', weight: 4 }
+    };
+
+    // 根据文件名获取图层样式
+    function getLayerStyle(fileName) {
+      return layerStyles[fileName] || {};
+    }
+
+    // 高亮要素图层
+    function highlightLayer(layer) {
+      // 清除上一次的高亮样式
+      if (highlightedLayer && highlightedLayer !== layer) {
+        if (highlightedLayer.defaultStyle) {
+          highlightedLayer.setStyle(highlightedLayer.defaultStyle);
+        } else if (currentGeoJsonLayer) {
+          currentGeoJsonLayer.resetStyle(highlightedLayer);
+        }
+      }
+
+      // 记录默认样式
+      if (!layer.defaultStyle) {
+        layer.defaultStyle = Object.assign({}, layer.options);
+      }
+
+      // 判断是否是面图层，设置高亮样式
+      const isPolygon = layer.feature.geometry.type.includes("Polygon");
+      layer.setStyle({
+        color: 'yellow',
+        weight: (layer.defaultStyle.weight || 2) + 2,
+        fillOpacity: isPolygon ? 0.3 : 0,
+        stroke: true
+      });
+
+      layer.bringToFront();  // 提到顶层
+      highlightedLayer = layer;
+    }
+
+    // 执行点击要素后的处理逻辑（高亮并记录属性）
+    function handleFeatureClick(layer, feature) {
+      highlightLayer(layer);
+      currentFeatureProps = feature.properties;
+      console.log('当前点击要素属性:', currentFeatureProps);
+    }
+
+    // 清除所有按钮的激活状态
+    function clearActiveButtons() {
+      document.querySelectorAll('#btnContainer button').forEach(btn => btn.classList.remove('active'));
+    }
+
+    // 加载指定 GeoJSON 图层文件
+    async function loadGeoJsonLayer(fileName) {
+      try {
+        const res = await fetch(`./geojson/${encodeURIComponent(fileName)}`);
+        if (!res.ok) throw new Error(`加载失败: ${res.statusText}`);
+        const data = await res.json();
+
+        // 清除当前图层
+        if (currentGeoJsonLayer) {
+          map.removeLayer(currentGeoJsonLayer);
+          currentGeoJsonLayer = null;
+        }
+
+        const style = getLayerStyle(fileName);
+
+        // 创建并添加 GeoJSON 图层
+        currentGeoJsonLayer = L.geoJSON(data, {
+          style,
+          onEachFeature: (feature, layer) => {
+            // 记录默认样式用于后续还原
+            layer.defaultStyle = style;
+            // 不绑定 click，避免多次触发，统一由 map.on('click') 控制
+          }
+        }).addTo(map);
+
+        // 自动缩放到图层范围
+        const bounds = currentGeoJsonLayer.getBounds();
+        if (bounds.isValid()) {
+          map.fitBounds(bounds, { maxZoom: 14 });
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    }
+
+    // 右侧按钮点击事件（切换不同图层）
+    document.getElementById('btnContainer').addEventListener('click', e => {
+      if (e.target.tagName !== 'BUTTON') return;
+
+      const fileName = e.target.dataset.file;
+      if (!fileName) return;
+
+      clearActiveButtons();
+      e.target.classList.add('active');
+
+      loadGeoJsonLayer(fileName);
+    });
+
+    // 地图点击事件（100 米容差范围内选中最近要素）
+    map.on('click', e => {
+      currentLocation = e.latlng
+      console.log('当前点击位置的经纬度：', currentLocation);  // 打印点击位置坐标
+      if (!currentGeoJsonLayer) return;
+
+      // 清除当前高亮要素样式
+      if (highlightedLayer && highlightedLayer.defaultStyle) {
+        highlightedLayer.setStyle(highlightedLayer.defaultStyle);
+        highlightedLayer = null;
+      }
+
+      const clickPoint = turf.point([e.latlng.lng, e.latlng.lat]);
+      const tolerance = 100; // 容差：100米
+      let closestLayer = null;
+      let minDistance = Infinity;
+
+      // 遍历所有要素图层，找到距离最近的那个
+      currentGeoJsonLayer.eachLayer(layer => {
+        try {
+          const feature = layer.feature;
+          let distance = Infinity;
+
+          switch (feature.geometry.type) {
+            case 'Point':
+              distance = turf.distance(clickPoint, turf.point(feature.geometry.coordinates), { units: 'meters' });
+              break;
+            case 'LineString':
+              distance = turf.pointToLineDistance(clickPoint, feature, { units: 'meters' });
+              break;
+            case 'Polygon':
+              if (turf.booleanPointInPolygon(clickPoint, feature)) {
+                distance = 0;
+              } else {
+                // 点不在面内，计算到各边界的最小距离
+                distance = Math.min(...feature.geometry.coordinates.map(ring =>
+                  turf.pointToLineDistance(clickPoint, turf.lineString(ring), { units: 'meters' })
+                ));
+              }
+              break;
+          }
+
+          // 找出在容差范围内距离最近的图层
+          if (distance <= tolerance && distance < minDistance) {
+            minDistance = distance;
+            closestLayer = layer;
+          }
+        } catch (err) {
+          console.error('计算距离出错:', err);
+        }
+      });
+
+      // 若有选中要素，则执行点击处理逻辑
+      if (closestLayer) {
+        handleFeatureClick(closestLayer, closestLayer.feature);
+        console.log(`已选中要素，距离：${minDistance.toFixed(1)}米`);
+      }
+    });
+  </script>
+</body>
+
+</html>
